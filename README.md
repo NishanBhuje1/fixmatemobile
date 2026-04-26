@@ -3,13 +3,13 @@ Live production website for a Sydney phone repair business. Full-stack applicati
 Live site: fixmatemobile.com
 Tech Stack
 
-Frontend (client/):
+Frontend (fixmate_mobile/):
 React
 Vite
 Tailwind CSS
 Deployed on Vercel
 
-Backend (server/):
+Backend (fixmate_backend/):
 Node.js + Express
 Prisma (database ORM)
 Resend (email service for quote requests and bookings)
