@@ -1,0 +1,55 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Pricing {
+  id        String   @id @default(uuid())
+  brand     String
+  model     String
+  issue     String
+  price     Int      // Changed: Single fixed price (in cents/lowest currency unit usually)
+  updatedAt DateTime @updatedAt
+
+  @@unique([brand, model, issue])
+  @@index([brand, model])
+}
+
+model Lead {
+  id            String    @id @default(uuid())
+  type          String
+  fullName      String
+  email         String?
+  phone         String
+  brand         String?
+  model         String
+  issue         String
+  message       String?
+  preferredDate DateTime?
+  preferredTime String?
+  
+  estimatedPrice Int?     // Changed: Replaced estimateLow/High with single value
+  
+  createdAt     DateTime  @default(now())
+
+  status        String    @default("NEW")
+  finalQuote    Int?
+  quoteNotes    String?
+  quotedAt      DateTime?
+
+  @@index([createdAt])
+  @@index([phone])
+}
+
+model AdminUser {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
