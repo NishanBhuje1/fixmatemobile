@@ -1,5 +1,5 @@
 FixMate Mobile
-Live production website for a Sydney phone repair business. Full-stack application with React frontend and Node.js backend, handling real customer bookings and quote requests.
+Live production website for a Melbourne phone repair business. Full-stack application with React frontend and Node.js backend, handling real customer bookings and quote requests.
 Live site: fixmatemobile.com
 Tech Stack
 
