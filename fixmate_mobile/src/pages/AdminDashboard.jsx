@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import AdminHours from "../components/AdminHours";
 
 const API = import.meta.env.VITE_API_URL;
 const LS_ADMIN_TOKEN = "fixmate_admin_token_v1";
@@ -376,7 +377,13 @@ export default function AdminDashboard() {
                       <td className="p-3 text-[#334578]/80">{r.brand}</td>
                       <td className="p-3 text-[#334578]/80">{r.model}</td>
                       <td className="p-3 text-[#334578]/80">{r.issue}</td>
-                      <td className="p-3 text-[#334578]/80">${centsToAud(r.price)}</td>
+                      <td className="p-3 text-[#334578]/80">
+                        {r.available === false
+                          ? "Not available"
+                          : r.price == null
+                          ? "Quote only"
+                          : `$${centsToAud(r.price)}`}
+                      </td>
                       <td className="p-3">
                         <button
                           onClick={() => deleteRule(r)}
@@ -396,6 +403,8 @@ export default function AdminDashboard() {
             Customers should use public endpoints (catalog/pricing). Admin endpoints remain protected by JWT.
           </p>
         </div>
+
+        <AdminHours apiJson={apiJson} />
       </div>
     </div>
   );

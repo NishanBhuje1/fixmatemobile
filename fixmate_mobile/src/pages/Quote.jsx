@@ -1,11 +1,43 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { saveConfirmedBooking } from "../lib/booking";
 
 const API = import.meta.env.VITE_API_URL;
 
 function centsToAud(cents) {
   if (cents == null) return null;
   return (Number(cents) / 100).toFixed(2);
+}
+
+// Repair status from /api/catalog: PRICED | QUOTE_ONLY | NOT_AVAILABLE
+function issueLabel(issue, status) {
+  if (status === "NOT_AVAILABLE") return `${issue} — Not available`;
+  if (status === "QUOTE_ONLY") return `${issue} — Get a quote`;
+  return issue;
+}
+
+// Home page service names that don't match a catalog repair name directly
+const ISSUE_ALIASES = { "camera repair": "camera replacement" };
+
+// Bookable repair matching a wanted name (e.g. ?issue=Screen Replacement), exact match first, then prefix
+function matchIssue(issues = [], statuses = {}, wanted) {
+  if (!wanted) return "";
+  const bookable = issues.filter((i) => statuses[i] !== "NOT_AVAILABLE");
+  const w = wanted.trim().toLowerCase();
+  const target = ISSUE_ALIASES[w] || w;
+  return (
+    bookable.find((i) => i.toLowerCase() === target) ||
+    bookable.find((i) => i.toLowerCase().startsWith(target)) ||
+    ""
+  );
+}
+
+function firstBookableIssue(issues = [], statuses = {}, preferred = "") {
+  return (
+    matchIssue(issues, statuses, preferred) ||
+    issues.find((i) => statuses[i] !== "NOT_AVAILABLE") ||
+    ""
+  );
 }
 
 async function fetchWithTimeout(url, options = {}, ms = 8000) {
@@ -37,6 +69,7 @@ function fireLeadConversion({ valueAud = 1.0 } = {}) {
 
 export default function Quote() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const [step, setStep] = useState(1);
 
@@ -46,6 +79,7 @@ export default function Quote() {
   const [brands, setBrands] = useState([]);
   const [modelsByBrand, setModelsByBrand] = useState({});
   const [issuesByBrandModel, setIssuesByBrandModel] = useState({});
+  const [issueStatusByBrandModel, setIssueStatusByBrandModel] = useState({});
 
   // selection
   const [brand, setBrand] = useState("");
@@ -56,13 +90,29 @@ export default function Quote() {
   const [loadingPrice, setLoadingPrice] = useState(false);
   const [priceError, setPriceError] = useState("");
   const [priceCents, setPriceCents] = useState(null);
+  const [quoteOnly, setQuoteOnly] = useState(false); // repair has no fixed price
 
   // booking fields
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
-  const [preferredDate, setPreferredDate] = useState("");
-  const [preferredTime, setPreferredTime] = useState("");
+
+  // repair the customer wants (from ?issue= or their last choice), kept across model changes
+  const issueParam = searchParams.get("issue") || "";
+  const [preferredIssue, setPreferredIssue] = useState(issueParam);
+
+  // time slots (Melbourne time, from the backend)
+  const [availability, setAvailability] = useState(null); // { days: [...] }
+  const [availLoading, setAvailLoading] = useState(false);
+  const [availError, setAvailError] = useState("");
+  const [selectedDate, setSelectedDate] = useState("");
+  const [slotStart, setSlotStart] = useState("");
+
+  // submission
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+  // set synchronously, so a fast double-click can't send two requests before React re-renders
+  const submittingRef = useRef(false);
 
   // Load catalog once
   useEffect(() => {
@@ -82,15 +132,31 @@ export default function Quote() {
         setBrands(data.brands || []);
         setModelsByBrand(data.modelsByBrand || {});
         setIssuesByBrandModel(data.issuesByBrandModel || {});
+        setIssueStatusByBrandModel(data.issueStatusByBrandModel || {});
 
-        // set defaults
-        const firstBrand = (data.brands || [])[0] || "";
+        // set defaults, honouring ?brand=...&model=... when they exist in the catalog
+        const brandList = data.brands || [];
+        const wantedBrand = searchParams.get("brand");
+        const firstBrand = brandList.includes(wantedBrand)
+          ? wantedBrand
+          : brandList[0] || "";
         setBrand(firstBrand);
-        const firstModel = (data.modelsByBrand?.[firstBrand] || [])[0] || "";
+
+        const modelList = data.modelsByBrand?.[firstBrand] || [];
+        const wantedModel = searchParams.get("model");
+        const firstModel = modelList.includes(wantedModel)
+          ? wantedModel
+          : modelList[0] || "";
         setModel(firstModel);
+
         const key = `${firstBrand}||${firstModel}`;
-        const firstIssue = (data.issuesByBrandModel?.[key] || [])[0] || "";
-        setIssue(firstIssue);
+        setIssue(
+          firstBookableIssue(
+            data.issuesByBrandModel?.[key],
+            data.issueStatusByBrandModel?.[key],
+            issueParam
+          )
+        );
       } catch (e) {
         if (!cancelled) setCatalogError(e.message || "Catalog failed");
       } finally {
@@ -101,6 +167,8 @@ export default function Quote() {
     return () => {
       cancelled = true;
     };
+    // load once; ?brand/?model/?issue only set the initial selection
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // computed lists
@@ -121,18 +189,42 @@ export default function Quote() {
     setStep((s) => Math.max(1, s - 1));
   }
 
-  // keep model/issue valid when brand changes
-  useEffect(() => {
-    if (!brand) return;
-    const m = (modelsByBrand[brand] || [])[0] || "";
-    setModel(m);
-  }, [brand, modelsByBrand]);
+  const issueStatuses = useMemo(
+    () => issueStatusByBrandModel[`${brand}||${model}`] || {},
+    [brand, model, issueStatusByBrandModel]
+  );
 
-  useEffect(() => {
-    if (!brand || !model) return;
-    const i = (issuesByBrandModel[`${brand}||${model}`] || [])[0] || "";
+  // ?issue= asked for a repair this model doesn't list (e.g. "Water Damage Check")
+  const issueParamUnmatched = Boolean(
+    issueParam &&
+      preferredIssue === issueParam &&
+      issues.length > 0 &&
+      !matchIssue(issues, issueStatuses, issueParam)
+  );
+
+  // keep model/issue valid when brand or model changes, keeping the customer's preferred repair if offered
+  // (done in the handlers, not effects, so a model pre-selected from the URL isn't overwritten)
+  function selectModel(b, m) {
+    setModel(m);
+    const key = `${b}||${m}`;
+    setIssue(
+      firstBookableIssue(
+        issuesByBrandModel[key],
+        issueStatusByBrandModel[key],
+        preferredIssue
+      )
+    );
+  }
+
+  function selectIssue(i) {
     setIssue(i);
-  }, [brand, model, issuesByBrandModel]);
+    setPreferredIssue(i);
+  }
+
+  function selectBrand(b) {
+    setBrand(b);
+    selectModel(b, (modelsByBrand[b] || [])[0] || "");
+  }
 
   // fetch price when entering step 2 or when selection changes on step2
   useEffect(() => {
@@ -145,6 +237,7 @@ export default function Quote() {
       setLoadingPrice(true);
       setPriceError("");
       setPriceCents(null);
+      setQuoteOnly(false);
 
       try {
         const url =
@@ -154,9 +247,18 @@ export default function Quote() {
 
         const res = await fetchWithTimeout(url, {}, 8000);
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data?.error || "Price not found");
+        if (data.status === "NOT_AVAILABLE") {
+          throw new Error("This repair is not available for this model");
+        }
+        // New API answers quote-only repairs with 404 + status; an older API answers 200 + price: null
+        const isQuote = data.status === "QUOTE_ONLY" || (res.ok && data.price == null);
+        if (!res.ok && !isQuote) throw new Error(data?.error || "Price not found");
 
-        if (!cancelled) setPriceCents(Number(data.price));
+        if (cancelled) return;
+        // Only a positive number is a real price; anything else (null, 0, junk) is "Get a quote", never $0.00
+        const cents = data.price == null ? NaN : Number(data.price);
+        if (isQuote || !(cents > 0)) setQuoteOnly(true);
+        else setPriceCents(cents);
       } catch (e) {
         if (!cancelled) setPriceError(e.message || "Failed to fetch price");
       } finally {
@@ -170,19 +272,66 @@ export default function Quote() {
     };
   }, [step, brand, model, issue]);
 
-  const canGoStep2 = Boolean(brand && model && issue);
-  const canGoStep3 = Boolean(priceCents != null && !loadingPrice);
-  const canSubmit = Boolean(
-    fullName &&
-      phone &&
-      email &&
-      preferredDate &&
-      preferredTime &&
-      priceCents != null
+  const canGoStep2 = Boolean(
+    brand && model && issue && issueStatuses[issue] !== "NOT_AVAILABLE"
   );
+  const hasPriceOrQuote = priceCents != null || quoteOnly;
+  const canGoStep3 = Boolean(hasPriceOrQuote && !loadingPrice);
+  const canSubmit = Boolean(
+    fullName.trim() &&
+      phone.trim() &&
+      email.trim() &&
+      slotStart &&
+      hasPriceOrQuote &&
+      !submitting
+  );
+
+  // Slots come from the backend in Melbourne time; reloaded every time step 3 opens and after a slot clash
+  async function loadAvailability({ keepSlot = true } = {}) {
+    setAvailLoading(true);
+    setAvailError("");
+    try {
+      const res = await fetchWithTimeout(`${API}/api/booking/availability`, {}, 10000);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || "Could not load available times");
+
+      const days = data.days || [];
+      setAvailability({ days });
+
+      const hasFree = (d) => d && !d.closed && d.slots.some((s) => s.available);
+      setSelectedDate((current) =>
+        hasFree(days.find((d) => d.date === current))
+          ? current
+          : days.find(hasFree)?.date || days[0]?.date || ""
+      );
+      setSlotStart((current) => {
+        if (!keepSlot) return "";
+        const still = days.flatMap((d) => d.slots).find((s) => s.start === current);
+        return still?.available ? current : "";
+      });
+    } catch (e) {
+      setAvailError(
+        e.name === "AbortError" ? "Loading times took too long." : e.message || "Could not load available times"
+      );
+    } finally {
+      setAvailLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (step === 3) loadAvailability();
+  }, [step]);
+
+  const selectedDay = availability?.days.find((d) => d.date === selectedDate) || null;
+  const selectedSlot = selectedDay?.slots.find((s) => s.start === slotStart) || null;
 
   async function handleBook(e) {
     e.preventDefault();
+    if (!canSubmit || submittingRef.current) return; // one request at a time
+
+    submittingRef.current = true;
+    setSubmitting(true);
+    setSubmitError("");
 
     try {
       const payload = {
@@ -193,10 +342,7 @@ export default function Quote() {
         brand,
         model,
         issue,
-        preferredDate: preferredDate
-          ? new Date(preferredDate).toISOString()
-          : null,
-        preferredTime,
+        slotStart, // exact slot; the server re-checks hours, notice and capacity
         estimatedPrice: priceCents, // cents
         message: "",
       };
@@ -212,7 +358,13 @@ export default function Quote() {
       );
 
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || "Failed to submit booking");
+      if (!res.ok) {
+        if (data?.code === "SLOT_FULL" || data?.code === "SLOT_INVALID") {
+          // someone took the last place (or the time passed): refresh times, keep everything else
+          loadAvailability({ keepSlot: false });
+        }
+        throw new Error(data?.error || "Failed to submit booking");
+      }
 
       /* 🔧 GOOGLE ADS CONVERSION TRACKING */
 
@@ -224,10 +376,19 @@ export default function Quote() {
         });
       }
 
-      alert("Appointment request submitted! We will contact you shortly.");
-      navigate("/");
+      // Only reached after the API confirmed the booking was saved
+      const booking = data.booking || null;
+      if (booking) saveConfirmedBooking(booking);
+      navigate("/booking/confirmed", { state: { booking } });
     } catch (err) {
-      alert(err.message || "Booking failed. Please try again.");
+      // Stay on the form with every input intact
+      setSubmitError(
+        err.name === "AbortError"
+          ? "The request timed out, so we can't tell if your booking went through. Please check your email or call us before trying again."
+          : err.message || "Booking failed. Please try again."
+      );
+      submittingRef.current = false;
+      setSubmitting(false);
     }
   }
 
@@ -283,7 +444,7 @@ export default function Quote() {
                   </label>
                   <select
                     value={brand}
-                    onChange={(e) => setBrand(e.target.value)}
+                    onChange={(e) => selectBrand(e.target.value)}
                     className="w-full rounded-xl border border-gray-200 px-4 py-3"
                   >
                     <option value="">Select brand</option>
@@ -301,7 +462,7 @@ export default function Quote() {
                   </label>
                   <select
                     value={model}
-                    onChange={(e) => setModel(e.target.value)}
+                    onChange={(e) => selectModel(brand, e.target.value)}
                     disabled={!brand}
                     className="w-full rounded-xl border border-gray-200 px-4 py-3 disabled:bg-gray-50"
                   >
@@ -322,7 +483,7 @@ export default function Quote() {
                   </label>
                   <select
                     value={issue}
-                    onChange={(e) => setIssue(e.target.value)}
+                    onChange={(e) => selectIssue(e.target.value)}
                     disabled={!brand || !model}
                     className="w-full rounded-xl border border-gray-200 px-4 py-3 disabled:bg-gray-50"
                   >
@@ -330,13 +491,31 @@ export default function Quote() {
                       {model ? "Select repair type" : "Select model first"}
                     </option>
                     {issues.map((i) => (
-                      <option key={i} value={i}>
-                        {i}
+                      <option
+                        key={i}
+                        value={i}
+                        disabled={issueStatuses[i] === "NOT_AVAILABLE"}
+                      >
+                        {issueLabel(i, issueStatuses[i])}
                       </option>
                     ))}
                   </select>
                 </div>
               </div>
+
+              {issueParamUnmatched && (
+                <p className="mt-4 text-sm text-[#334578]/80 bg-blue-50 rounded-xl px-4 py-3">
+                  “{issueParam}” isn’t listed for this model. Choose the
+                  closest repair above, or{" "}
+                  <Link
+                    to="/custom-quote"
+                    className="text-blue-700 hover:text-blue-800 font-semibold"
+                  >
+                    request a custom quote
+                  </Link>
+                  .
+                </p>
+              )}
 
               <div className="flex items-center justify-between mt-6">
                 <div className="text-sm text-[#334578]/80">
@@ -372,7 +551,7 @@ export default function Quote() {
                 {/* Top section */}
                 <div className="p-6 md:p-8 text-center">
                   <div className="inline-flex items-center px-3 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-bold uppercase tracking-wide">
-                    Estimated cost only
+                    {quoteOnly ? "Quote required" : "Estimated cost only"}
                   </div>
 
                   <div className="mt-4 text-lg md:text-xl font-semibold text-[#334578]">
@@ -400,6 +579,17 @@ export default function Quote() {
                           pricing.
                         </div>
                       </>
+                    ) : quoteOnly ? (
+                      <>
+                        <div className="text-3xl md:text-4xl font-extrabold text-[#0044ff] leading-none">
+                          Get a quote
+                        </div>
+                        <div className="mt-3 text-sm text-[#334578]/70">
+                          We don’t have a fixed price for this repair yet. Book
+                          an appointment and we’ll quote you after a quick
+                          inspection.
+                        </div>
+                      </>
                     ) : (
                       <div className="text-red-600 font-semibold">
                         {priceError
@@ -424,7 +614,7 @@ export default function Quote() {
                     disabled={!canGoStep3}
                     className="px-6 py-4 font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 transition-colors"
                   >
-                    Book appointment now
+                    {quoteOnly ? "Get a quote" : "Book appointment now"}
                   </button>
 
                   <Link
@@ -451,6 +641,10 @@ export default function Quote() {
                   {priceCents != null ? (
                     <span className="font-normal text-[#334578]/80">
                       (Price: ${centsToAud(priceCents)})
+                    </span>
+                  ) : quoteOnly ? (
+                    <span className="font-normal text-[#334578]/80">
+                      (Price: To be quoted)
                     </span>
                   ) : null}
                 </div>
@@ -491,48 +685,150 @@ export default function Quote() {
                   />
                 </div>
 
-                <div>
-                  <label className="block text-sm font-semibold text-[#334578] mb-2">
-                    Preferred date
-                  </label>
-                  <input
-                    type="date"
-                    value={preferredDate}
-                    onChange={(e) => setPreferredDate(e.target.value)}
-                    className="w-full rounded-xl border border-gray-200 px-4 py-3"
-                  />
+                {/* min-w-0: lets the scrolling day row shrink instead of widening the page on phones */}
+                <div className="md:col-span-2 min-w-0">
+                  <div className="flex items-baseline justify-between gap-2 mb-2">
+                    <span className="block text-sm font-semibold text-[#334578]">
+                      Choose a time
+                    </span>
+                    <span className="text-xs text-[#334578]/60">
+                      Melbourne time · 30 min slots
+                    </span>
+                  </div>
+
+                  {availLoading && !availability ? (
+                    <div className="text-[#334578]/80 text-sm py-3">
+                      Loading available times...
+                    </div>
+                  ) : availError && !availability ? (
+                    <div className="text-sm py-3">
+                      <span className="text-red-600 font-semibold">{availError}</span>{" "}
+                      <button
+                        type="button"
+                        onClick={() => loadAvailability()}
+                        className="text-blue-700 hover:text-blue-800 font-semibold"
+                      >
+                        Try again
+                      </button>
+                    </div>
+                  ) : availability ? (
+                    <>
+                      {/* Day chips */}
+                      <div className="flex gap-2 overflow-x-auto pb-2 -mx-1 px-1">
+                        {availability.days.map((d) => {
+                          const free = d.slots.filter((s) => s.available).length;
+                          const disabled = d.closed || free === 0;
+                          const active = d.date === selectedDate;
+                          return (
+                            <button
+                              key={d.date}
+                              type="button"
+                              disabled={disabled}
+                              onClick={() => setSelectedDate(d.date)}
+                              aria-pressed={active}
+                              className={`shrink-0 min-w-[84px] rounded-xl border px-3 py-2 text-left transition-colors ${
+                                active
+                                  ? "border-blue-600 bg-blue-600 text-white"
+                                  : disabled
+                                  ? "border-gray-100 bg-gray-50 text-gray-400"
+                                  : "border-gray-200 bg-white text-[#334578] hover:border-blue-300"
+                              }`}
+                            >
+                              <div className="text-sm font-semibold">{d.label}</div>
+                              <div className={`text-xs ${active ? "text-white/80" : ""}`}>
+                                {d.closed
+                                  ? "Closed"
+                                  : d.slots.length === 0
+                                  ? "No times left"
+                                  : free === 0
+                                  ? "Full"
+                                  : `${free} times`}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Slots for the chosen day: full slots stay visible but disabled */}
+                      {selectedDay && !selectedDay.closed && selectedDay.slots.length > 0 ? (
+                        <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mt-2">
+                          {selectedDay.slots.map((s) => {
+                            const active = s.start === slotStart;
+                            return (
+                              <button
+                                key={s.start}
+                                type="button"
+                                disabled={!s.available}
+                                onClick={() => setSlotStart(s.start)}
+                                aria-pressed={active}
+                                aria-label={s.available ? s.label : `${s.label}, unavailable`}
+                                className={`rounded-xl border px-2 py-3 text-sm font-semibold transition-colors ${
+                                  active
+                                    ? "border-blue-600 bg-blue-600 text-white"
+                                    : s.available
+                                    ? "border-gray-200 bg-white text-[#334578] hover:border-blue-300"
+                                    : "border-gray-100 bg-gray-50 text-gray-400 cursor-not-allowed"
+                                }`}
+                              >
+                                <span className={s.available ? "" : "line-through"}>{s.label}</span>
+                                {!s.available && (
+                                  <span className="block text-[11px] font-normal no-underline">
+                                    Unavailable
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="text-sm text-[#334578]/70 py-3">
+                          {selectedDay?.closed
+                            ? `We’re closed this day${selectedDay.note ? ` (${selectedDay.note})` : ""}. Please pick another day.`
+                            : "No times left on this day. Please pick another day."}
+                        </div>
+                      )}
+
+                      <div className="mt-3 text-sm text-[#334578]" aria-live="polite">
+                        {selectedSlot ? (
+                          <>
+                            Selected:{" "}
+                            <span className="font-semibold">
+                              {selectedDay.label}, {selectedSlot.label}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-[#334578]/60">No time selected yet.</span>
+                        )}
+                      </div>
+                    </>
+                  ) : null}
                 </div>
 
-                <div>
-                  <label className="block text-sm font-semibold text-[#334578] mb-2">
-                    Preferred time
-                  </label>
-                  <select
-                    value={preferredTime}
-                    onChange={(e) => setPreferredTime(e.target.value)}
-                    className="w-full rounded-xl border border-gray-200 px-4 py-3"
+                {submitError && (
+                  <div
+                    role="alert"
+                    className="md:col-span-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"
                   >
-                    <option value="">Select time</option>
-                    <option value="Morning">Morning (9am–12pm)</option>
-                    <option value="Afternoon">Afternoon (12pm–4pm)</option>
-                    <option value="Evening">Evening (4pm–7pm)</option>
-                  </select>
-                </div>
+                    {submitError}
+                  </div>
+                )}
 
                 <div className="md:col-span-2 flex items-center justify-between mt-2">
                   <button
                     type="button"
                     onClick={back}
-                    className="px-6 py-3 rounded-full border border-gray-200 font-semibold text-[#334578] hover:bg-gray-50"
+                    disabled={submitting}
+                    className="px-6 py-3 rounded-full border border-gray-200 font-semibold text-[#334578] hover:bg-gray-50 disabled:opacity-50"
                   >
                     Back
                   </button>
                   <button
                     type="submit"
                     disabled={!canSubmit}
+                    aria-busy={submitting}
                     className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-semibold px-6 py-3 rounded-full"
                   >
-                    Confirm booking
+                    {submitting ? "Booking..." : "Confirm booking"}
                   </button>
                 </div>
               </form>

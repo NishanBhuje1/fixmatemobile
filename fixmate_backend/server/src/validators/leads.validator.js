@@ -11,6 +11,7 @@ export const LeadCreateSchema = z.object({
   message: z.string().optional().nullable(),
   preferredDate: z.string().optional().nullable(), // ISO string from frontend, or null
   preferredTime: z.string().optional().nullable(),
+  slotStart: z.string().optional().nullable(), // ISO start of a 30-min slot from /api/booking/availability
 
   // NEW (preferred)
   estimatedPrice: z.number().int().nonnegative().optional().nullable(),

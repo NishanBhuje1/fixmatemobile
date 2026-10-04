@@ -10,6 +10,7 @@ import { leadsRouter } from "./routes/leads.routes.js";
 import { adminRouter } from "./routes/admin.routes.js";
 import { quotesRouter } from "./routes/quotes.routes.js";
 import { catalogRouter } from "./routes/catalog.routes.js";
+import { storeRouter, bookingRouter } from "./routes/store.routes.js";
 
 
 
@@ -27,6 +28,9 @@ app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
 
 // --- CORS Setup Start ---
+// TODO: env.CORS_ORIGIN is an array (env.js splits it on commas), so the string filter below
+// drops it and the CORS_ORIGIN env var has no effect. Only the hard-coded origins are allowed.
+// Fix: spread it in (...env.CORS_ORIGIN) and confirm Render's CORS_ORIGIN value first.
 const rawOrigins = [
   env.CORS_ORIGIN,
   "https://fixmatemobile.vercel.app",
@@ -68,6 +72,8 @@ app.use("/api/leads", leadsRouter);
 app.use("/api/quotes", quotesRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/catalog", catalogRouter);
+app.use("/api/store", storeRouter);
+app.use("/api/booking", bookingRouter);
 
 
 app.use((err, _req, res, _next) => {

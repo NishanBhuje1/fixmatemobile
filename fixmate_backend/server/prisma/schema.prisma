@@ -12,7 +12,8 @@ model Pricing {
   brand     String
   model     String
   issue     String
-  price     Int      // Changed: Single fixed price (in cents/lowest currency unit usually)
+  price     Int?     // Fixed price in cents; null = no fixed price ("Get a quote")
+  available Boolean  @default(true) // false = repair not offered ("Not available")
   updatedAt DateTime @updatedAt
 
   @@unique([brand, model, issue])
@@ -29,9 +30,11 @@ model Lead {
   model         String
   issue         String
   message       String?
-  preferredDate DateTime?
-  preferredTime String?
-  
+  preferredDate DateTime? // legacy bookings: chosen day at midnight UTC
+  preferredTime String?   // legacy bookings: "Morning" / "Afternoon" / "Evening"; new bookings: slot label e.g. "2:30 pm"
+  slotStart     DateTime? // exact 30-min slot start (UTC instant); null for legacy bookings and custom quotes
+  reference     String?   @unique // booking reference shown to the customer, e.g. FM-7K3Q9
+
   estimatedPrice Int?     // Changed: Replaced estimateLow/High with single value
   
   createdAt     DateTime  @default(now())
@@ -43,6 +46,22 @@ model Lead {
 
   @@index([createdAt])
   @@index([phone])
+  @@index([slotStart])
+}
+
+// Weekly opening hours, Australia/Melbourne local time (minutes after midnight)
+model StoreHours {
+  dayOfWeek   Int  @id // 0 = Sunday … 6 = Saturday
+  openMinute  Int? // null = closed every week on this day
+  closeMinute Int?
+}
+
+// One-off changes to a specific date: public holidays (closed) or special trading hours
+model StoreDateOverride {
+  date        DateTime @id @db.Date // Melbourne calendar date
+  openMinute  Int? // both null = closed all day
+  closeMinute Int?
+  note        String?
 }
 
 model AdminUser {

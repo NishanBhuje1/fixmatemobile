@@ -15,55 +15,36 @@ import {
   Clock
 } from "lucide-react";
 
-// --- Helper: Schedule Data & Logic ---
-const SCHEDULE = [
-  { day: "Sunday",    open: 10, close: 17, label: "10:00 AM – 5:00 PM" }, // Index 0
-  { day: "Monday",    open: 9,  close: 17.5, label: "9:00 AM – 5:30 PM" }, // Index 1
-  { day: "Tuesday",   open: 9,  close: 17.5, label: "9:00 AM – 5:30 PM" },
-  { day: "Wednesday", open: 9,  close: 17.5, label: "9:00 AM – 5:30 PM" },
-  { day: "Thursday",  open: 9,  close: 21,   label: "9:00 AM – 9:00 PM" },
-  { day: "Friday",    open: 9,  close: 21,   label: "9:00 AM – 9:00 PM" },
-  { day: "Saturday",  open: 9,  close: 17,   label: "9:00 AM – 5:00 PM" },
-];
-
-function getStoreStatus() {
-  const now = new Date();
-  const dayIndex = now.getDay(); // 0 = Sun, 1 = Mon, etc.
-  const currentHour = now.getHours() + now.getMinutes() / 60; // Decimal time (e.g., 17.5 = 5:30pm)
-  
-  const todaySchedule = SCHEDULE[dayIndex];
-
-  if (currentHour >= todaySchedule.open && currentHour < todaySchedule.close) {
-    return { 
-      isOpen: true, 
-      text: `Open until ${todaySchedule.label.split('–')[1].trim()}`,
-      color: "green"
-    };
-  } else {
-    // Logic to find next opening time
-    let nextDayIndex = (dayIndex + 1) % 7;
-    const nextDayName = SCHEDULE[nextDayIndex].day;
-    const nextOpenTime = SCHEDULE[nextDayIndex].label.split('–')[0].trim();
-    
-    return { 
-      isOpen: false, 
-      text: `Closed • Opens ${nextDayName} ${nextOpenTime}`,
-      color: "red"
-    };
-  }
-}
+import { fetchStoreHours, melbourneNow, storeStatus } from "../lib/store";
 
 export default function VisitStore() {
-  const [status, setStatus] = useState(getStoreStatus());
+  // Opening hours come from the backend (single source, editable in the admin dashboard)
+  const [hours, setHours] = useState(null);
+  const [hoursError, setHoursError] = useState(false);
+  const [now, setNow] = useState(() => melbourneNow());
   const [showHours, setShowHours] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchStoreHours()
+      .then((h) => !cancelled && setHours(h))
+      .catch(() => !cancelled && setHoursError(true));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Update status every minute to keep it accurate
   useEffect(() => {
     const timer = setInterval(() => {
-      setStatus(getStoreStatus());
+      setNow(melbourneNow());
     }, 60000);
     return () => clearInterval(timer);
   }, []);
+
+  const status = hours
+    ? storeStatus(hours, now)
+    : { isOpen: false, text: hoursError ? "Call us for today’s hours" : "Checking hours..." };
 
   const containerVariants = {
     hidden: { opacity: 0 },
@@ -132,12 +113,12 @@ export default function VisitStore() {
                   <h2 className="text-xl font-bold">FixMate Mobile</h2>
                   
                   {/* Dynamic Status Badge */}
-                  <div className={`flex items-center text-sm font-semibold mt-1 ${status.isOpen ? 'text-green-600' : 'text-red-500'}`}>
+                  <div className={`flex items-center text-sm font-semibold mt-1 ${status.isOpen ? 'text-green-600' : hours ? 'text-red-500' : 'text-[#334578]/60'}`}>
                     <span className="relative flex h-2.5 w-2.5 mr-2">
                       {status.isOpen && (
                         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
                       )}
-                      <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${status.isOpen ? 'bg-green-500' : 'bg-red-500'}`}></span>
+                      <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${status.isOpen ? 'bg-green-500' : hours ? 'bg-red-500' : 'bg-gray-300'}`}></span>
                     </span>
                     {status.text}
                   </div>
@@ -167,17 +148,38 @@ export default function VisitStore() {
                       exit={{ height: 0, opacity: 0 }}
                       className="overflow-hidden"
                     >
-                      <ul className="mt-4 space-y-2 text-sm text-[#334578]/80">
-                        {SCHEDULE.map((item, index) => {
-                          const isToday = new Date().getDay() === index;
-                          return (
-                            <li key={item.day} className={`flex justify-between ${isToday ? 'font-bold text-[#334578]' : ''}`}>
-                              <span>{item.day}</span>
-                              <span>{item.label}</span>
-                            </li>
-                          );
-                        })}
-                      </ul>
+                      {hours ? (
+                        <>
+                          <ul className="mt-4 space-y-2 text-sm text-[#334578]/80">
+                            {hours.weekly.map((item) => {
+                              const isToday = now.dayOfWeek === item.dayOfWeek;
+                              return (
+                                <li key={item.day} className={`flex justify-between ${isToday ? 'font-bold text-[#334578]' : ''}`}>
+                                  <span>{item.day}</span>
+                                  <span>{item.label}</span>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                          {hours.upcoming.length > 0 && (
+                            <div className="mt-4 pt-3 border-t border-gray-100">
+                              <div className="text-xs font-semibold uppercase tracking-wide text-[#334578]/60 mb-2">Special hours</div>
+                              <ul className="space-y-2 text-sm text-[#334578]/80">
+                                {hours.upcoming.map((o) => (
+                                  <li key={o.date} className="flex justify-between gap-4">
+                                    <span>{o.label}{o.note ? ` · ${o.note}` : ''}</span>
+                                    <span className={o.closed ? 'font-semibold text-red-500' : ''}>{o.hoursLabel}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <p className="mt-4 text-sm text-[#334578]/70">
+                          {hoursError ? 'Opening hours are unavailable right now. Please call us.' : 'Loading hours...'}
+                        </p>
+                      )}
                     </motion.div>
                   )}
                 </AnimatePresence>

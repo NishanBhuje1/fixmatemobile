@@ -11,6 +11,7 @@ import Quote from "./pages/Quote";
 import CustomQuote from "./pages/CustomQuote";
 import Welcome from "./pages/Welcome";
 import Contact from "./pages/Contact";
+import BookingConfirmed from "./pages/BookingConfirmed";
 
 function HomePage() {
   return (
@@ -36,6 +37,7 @@ export default function App() {
           <Route path="/visit-store" element={<VisitStore />} />
           <Route path="/quote" element={<Quote />} />
           <Route path="/custom-quote" element={<CustomQuote />} />
+          <Route path="/booking/confirmed" element={<BookingConfirmed />} />
           <Route path="*" element={<HomePage />} />
         </Routes>
       </main>
